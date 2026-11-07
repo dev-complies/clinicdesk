@@ -154,7 +154,7 @@ describe("Guardrails – Emergency, Rate Limits, Prompt", () => {
     it("contains prompt injection resistance rule", () => {
       const prompt = buildSystemPrompt({ clinicName: "Test Clinic", timezone: "Asia/Kolkata" });
       expect(prompt).toMatch(/ignore previous instructions/i);
-      expect(prompt).toMatch(/data.*never instructions|never instructions.*data/is);
+      expect(prompt).toMatch(/data[\s\S]*never instructions|never instructions[\s\S]*data/i);
     });
 
     it("contains identity and privacy rules", () => {

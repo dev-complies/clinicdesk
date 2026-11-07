@@ -59,8 +59,7 @@ async function selectOrInsert<T extends Record<string, unknown>>(
 ): Promise<T> {
   const query = admin.from(table).select("*");
   for (const [col, val] of Object.entries(matchCols)) {
-    // @ts-expect-error – dynamic column filter
-    query.eq(col, val);
+    (query as any).eq(col, val);
   }
   const { data: existing, error: selErr } = await query.limit(1).single<T>();
 
