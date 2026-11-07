@@ -20,3 +20,14 @@
 - **Context:** `src/lib/supabase/admin.ts` imports `"server-only"` to prevent client bundling in Next.js. However, standard Node/Vitest test environments do not run under React Server Component bundler conditions, causing `server-only` to throw.
 - **Decision:** An alias was configured in `vitest.config.ts` mapping `"server-only"` to an empty stub module (`tests/stubs/server-only.ts`). This enforces production compile-time isolation without sacrificing unit testing.
 
+### 6. Concurrency & Double-Booking Protection (Week 2, Part B)
+- **Context:** Concurrent requests may pass application-level availability checks simultaneously.
+- **Decision:** Application code verifies slot availability against the schedule grid and existing appointments, but relies on Postgres' partial unique index `appointments_no_double_booking (doctor_id, start_at) WHERE status = 'booked'` as the ultimate synchronization authority. Code `23505` specifically matching this index is mapped to `SLOT_TAKEN` with next free slots returned, while any other violation returns `INTERNAL_ERROR`.
+
+### 7. Patient Race Conditions & Rollback Hygiene
+- **Context:** Multiple concurrent requests with the same phone number or new patients booking appointments.
+- **Decision:** `patients` are queried via select-then-insert. Concurrent inserts catching `23505` re-select the existing row. The stored name in the database is never overwritten, but the returned booking confirmation always reflects the name provided in the current request. If a new patient record was created during a failed booking attempt, it is immediately deleted if no other appointments exist for it.
+
+### 8. Fair Booking Limit (`TOO_MANY_BOOKINGS`)
+- **Context:** Preventing automated booking exhaustion by a single patient.
+- **Decision:** A strict cap of at most 3 active future bookings per patient is enforced before booking an appointment.

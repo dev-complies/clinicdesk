@@ -8,9 +8,12 @@ export type ToolErrorCode =
   | "CLINIC_NOT_FOUND"
   | "DOCTOR_NOT_FOUND"
   | "DATE_TOO_FAR"
-  | "INTERNAL_ERROR";
+  | "INTERNAL_ERROR"
+  | "INVALID_PHONE"
+  | "INVALID_SLOT"
+  | "SLOT_TAKEN"
+  | "TOO_MANY_BOOKINGS";
 
-export type ToolResult<T> =
+export type ToolResult<T, E = unknown> =
   | { ok: true; data: T }
-  | { ok: false; error: ToolErrorCode; message: string };
-
+  | { ok: false; error: ToolErrorCode; message: string; data?: E };

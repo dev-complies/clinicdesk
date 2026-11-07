@@ -1,7 +1,13 @@
 import { DateTime } from "luxon";
 import { z } from "zod";
 import { getAdminClient } from "../supabase/admin";
+import {
+  AvailabilitySlot,
+  getDoctorDayScheduleContext,
+} from "./availability-helper";
 import { ToolResult } from "./types";
+
+export type { AvailabilitySlot };
 
 export const checkAvailabilityInputSchema = z.object({
   doctor_id: z.string().uuid({ message: "Invalid doctor_id format; expected UUID" }),
@@ -11,12 +17,6 @@ export const checkAvailabilityInputSchema = z.object({
 });
 
 export type CheckAvailabilityInput = z.infer<typeof checkAvailabilityInputSchema>;
-
-export interface AvailabilitySlot {
-  start_at: string; // UTC ISO string
-  end_at: string;   // UTC ISO string
-  label: string;    // Local clinic time formatted, e.g. "9:00 AM", "10:15 AM"
-}
 
 /**
  * Checks doctor availability for a given date in the clinic's local timezone.
@@ -109,132 +109,21 @@ export async function checkAvailability(
       };
     }
 
-    // 4. Verify doctor belongs to clinicId and is active
-    const { data: doctor, error: doctorError } = await supabase
-      .from("doctors")
-      .select("id, active")
-      .eq("id", doctorId)
-      .eq("clinic_id", clinicId)
-      .maybeSingle();
+    // 4. Load schedule context and available slots
+    const contextResult = await getDoctorDayScheduleContext(
+      clinicId,
+      doctorId,
+      requestedDate,
+      now
+    );
 
-    if (doctorError) {
-      console.error("[check_availability] error loading doctor:", doctorError.message);
-      return {
-        ok: false,
-        error: "INTERNAL_ERROR",
-        message: "Failed to verify doctor",
-      };
-    }
-
-    if (!doctor || !doctor.active) {
-      return {
-        ok: false,
-        error: "DOCTOR_NOT_FOUND",
-        message: "Doctor not found or inactive",
-      };
-    }
-
-    // 5. Look up doctor's schedule for that weekday
-    // Luxon weekday: 1 (Mon) ... 7 (Sun)
-    // DB convention: 0 (Sun) ... 6 (Sat)
-    const dbWeekday = requestedDate.weekday === 7 ? 0 : requestedDate.weekday;
-
-    const { data: schedule, error: scheduleError } = await supabase
-      .from("doctor_schedules")
-      .select("start_time, end_time, slot_minutes")
-      .eq("doctor_id", doctorId)
-      .eq("clinic_id", clinicId)
-      .eq("weekday", dbWeekday)
-      .maybeSingle();
-
-    if (scheduleError) {
-      console.error("[check_availability] error loading schedule:", scheduleError.message);
-      return {
-        ok: false,
-        error: "INTERNAL_ERROR",
-        message: "Failed to load doctor schedule",
-      };
-    }
-
-    // If no schedule exists for this weekday, return empty list
-    if (!schedule) {
-      return {
-        ok: true,
-        data: [],
-      };
-    }
-
-    // 6. Generate slots within [start_time, end_time]
-    const [startH, startM] = schedule.start_time.split(":").map(Number);
-    const [endH, endM] = schedule.end_time.split(":").map(Number);
-
-    let slotStart = requestedDate.set({ hour: startH, minute: startM, second: 0, millisecond: 0 });
-    const scheduleEnd = requestedDate.set({ hour: endH, minute: endM, second: 0, millisecond: 0 });
-    const slotMinutes = schedule.slot_minutes;
-
-    const generatedSlots: { start: DateTime; end: DateTime }[] = [];
-    while (slotStart.plus({ minutes: slotMinutes }) <= scheduleEnd) {
-      const slotEnd = slotStart.plus({ minutes: slotMinutes });
-      generatedSlots.push({ start: slotStart, end: slotEnd });
-      slotStart = slotEnd;
-    }
-
-    // 7. Query booked appointments using the UTC range from local start-of-day to next local start-of-day
-    const dayStartUtc = requestedDate.toUTC().toISO();
-    const nextDayStartUtc = requestedDate.plus({ days: 1 }).toUTC().toISO();
-
-    const { data: bookedAppointments, error: apptError } = await supabase
-      .from("appointments")
-      .select("start_at, end_at")
-      .eq("doctor_id", doctorId)
-      .eq("clinic_id", clinicId)
-      .eq("status", "booked")
-      .gte("start_at", dayStartUtc)
-      .lt("start_at", nextDayStartUtc);
-
-    if (apptError) {
-      console.error("[check_availability] error querying appointments:", apptError.message);
-      return {
-        ok: false,
-        error: "INTERNAL_ERROR",
-        message: "Failed to check booked appointments",
-      };
-    }
-
-    const bookedIntervals = (bookedAppointments || []).map((appt) => ({
-      start: DateTime.fromISO(appt.start_at),
-      end: DateTime.fromISO(appt.end_at),
-    }));
-
-    // 8. Filter candidate slots:
-    //    a) Remove slots overlapping any booked appointment
-    //    b) Remove slots earlier than "now"
-    const availableSlots: AvailabilitySlot[] = [];
-
-    for (const slot of generatedSlots) {
-      // Overlap condition: slot.start < appt.end && slot.end > appt.start
-      const overlapsBooked = bookedIntervals.some(
-        (appt) => slot.start < appt.end && slot.end > appt.start
-      );
-      if (overlapsBooked) {
-        continue;
-      }
-
-      // Past slot condition: slots starting earlier than current time
-      if (slot.start < currentNow) {
-        continue;
-      }
-
-      availableSlots.push({
-        start_at: slot.start.toUTC().toISO()!,
-        end_at: slot.end.toUTC().toISO()!,
-        label: slot.start.toFormat("h:mm a"),
-      });
+    if (!contextResult.ok) {
+      return contextResult;
     }
 
     return {
       ok: true,
-      data: availableSlots,
+      data: contextResult.data.availableSlots,
     };
   } catch (err) {
     console.error("[check_availability] unexpected error:", err);
@@ -245,4 +134,3 @@ export async function checkAvailability(
     };
   }
 }
-
