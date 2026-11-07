@@ -31,3 +31,11 @@
 ### 8. Fair Booking Limit (`TOO_MANY_BOOKINGS`)
 - **Context:** Preventing automated booking exhaustion by a single patient.
 - **Decision:** A strict cap of at most 3 active future bookings per patient is enforced before booking an appointment.
+
+### 9. Handoff Reason Message Recording (Week 2, Part C)
+- **Context:** Week 2 Part C specified recording the handoff reason as a 'system' message on the conversation if the existing messages table schema allowed it without a migration.
+- **Decision:** In `supabase/migrations/20261107000000_initial_schema.sql`, `messages.role` is constrained by `CHECK (role IN ('user', 'assistant', 'tool'))`. Inserting `'system'` violates this database check constraint. Per instructions to not touch migrations, message insertion was omitted and conversation status update is handled directly.
+
+### 10. Atomic Cancel & Reschedule with Optimistic Concurrency Guards
+- **Context:** Concurrent calls to cancel or reschedule the same appointment must not corrupt data or produce duplicate slots.
+- **Decision:** Both operations execute as a single SQL `UPDATE ... WHERE id = :id AND clinic_id = :clinicId AND status = 'booked' AND start_at = :originalStartAt AND start_at > :now`. If zero rows are affected, a re-read determines the precise error (`ALREADY_CANCELLED`, `APPOINTMENT_NOT_CANCELLABLE`, or `APPOINTMENT_NOT_FOUND`). For reschedule, double-booking collisions during the UPDATE trigger `23505` on `appointments_no_double_booking`, returning `SLOT_TAKEN` while preserving the original appointment untouched.

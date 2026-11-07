@@ -12,7 +12,11 @@ export type ToolErrorCode =
   | "INVALID_PHONE"
   | "INVALID_SLOT"
   | "SLOT_TAKEN"
-  | "TOO_MANY_BOOKINGS";
+  | "TOO_MANY_BOOKINGS"
+  | "APPOINTMENT_NOT_FOUND"
+  | "ALREADY_CANCELLED"
+  | "APPOINTMENT_NOT_CANCELLABLE"
+  | "CONVERSATION_NOT_FOUND";
 
 export type ToolResult<T, E = unknown> =
   | { ok: true; data: T }
