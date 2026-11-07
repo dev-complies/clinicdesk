@@ -1,6 +1,19 @@
 import { APICallError, isStepCount, streamText } from "ai";
 import { NextRequest, NextResponse } from "next/server";
 import { z } from "zod";
+import {
+  buildMedicalEmergencyReply,
+  buildSelfHarmReply,
+  detectEmergency,
+} from "../../../lib/guardrails/emergency";
+import {
+  build429Message,
+  checkAndIncrementIp,
+  checkClinicRateLimit,
+  checkConversationRateLimit,
+  extractIp,
+  getRateLimitConfig,
+} from "../../../lib/guardrails/rate-limit";
 import { getChatModel, getModelIds } from "../../../lib/llm/model";
 import { resolveClinicId } from "../../../lib/llm/resolve-clinic";
 import { buildSystemPrompt } from "../../../lib/llm/system-prompt";
@@ -30,7 +43,7 @@ function sanitizeForLogs(value: unknown): string {
       : JSON.stringify(value);
 
   return str
-    .replace(/(?:\+?\d{1,3}[-.\s]?)?\(?\d{3}\)?[-.\s]?\d{3}[-.\s]?\d{4}/g, "[PHONE_REDACTED]")
+    .replace(/(?:\+?\d{1,3}[-.\\s]?)?\(?\d{3}\)?[-.\\s]?\d{3}[-.\\s]?\d{4}/g, "[PHONE_REDACTED]")
     .replace(/\b\d{10}\b/g, "[PHONE_REDACTED]")
     .replace(
       /(?:key|secret|token|password|auth|bearer)[\w-]*\s*[:=]\s*["']?[\w.-]+["']?/gi,
@@ -72,7 +85,8 @@ export async function POST(req: NextRequest | Request): Promise<Response> {
   const TOTAL_BUDGET_MS = 25_000;
 
   try {
-    // A. Parse and validate JSON body
+    // ── STEP A: Parse and validate JSON body ────────────────────────────────
+    // Rejected here write NOTHING to the database.
     let rawBody: unknown;
     try {
       rawBody = await req.json();
@@ -90,11 +104,26 @@ export async function POST(req: NextRequest | Request): Promise<Response> {
 
     const { conversation_id, message } = parsed.data;
 
-    // B. Resolve tenant clinic ID strictly from server environment
+    // ── STEP B: In-memory per-IP rate limit (no DB touch) ───────────────────
+    const rateLimitConfig = getRateLimitConfig();
+    const clientIp = extractIp(req);
+    if (checkAndIncrementIp(clientIp, rateLimitConfig)) {
+      return new Response(build429Message(), {
+        status: 429,
+        headers: { "Content-Type": "text/plain; charset=utf-8" },
+      });
+    }
+
+    // ── STEP C: Emergency check on in-memory message text ───────────────────
+    // Performed before any DB access so emergencies always get a reply even
+    // during outages. If triggered, we fall through to DB work below.
+    const emergencyKind = detectEmergency(message);
+
+    // ── STEP D: Resolve clinic (server-only, throws if misconfigured) ────────
     const clinicId = await resolveClinicId();
     const supabase = getAdminClient();
 
-    // C. Fetch clinic settings (name, timezone, handoff_phone)
+    // ── STEP E: Fetch clinic settings ───────────────────────────────────────
     const { data: clinic, error: clinicErr } = await supabase
       .from("clinics")
       .select("id, name, timezone, handoff_phone")
@@ -106,9 +135,12 @@ export async function POST(req: NextRequest | Request): Promise<Response> {
       return NextResponse.json({ error: "Clinic not found" }, { status: 404 });
     }
 
-    // D. Validate or create conversation
+    // ── STEP F: Validate conversation (non-emergencies) or look it up ────────
+    // For emergencies we still look up / create the conversation so we can
+    // persist the message and mark it handed_off.
     let conversationId: string;
     let conversationStatus = "active";
+    let conversationAlreadyExists = false;
 
     if (conversation_id) {
       const { data: conv, error: convErr } = await supabase
@@ -123,7 +155,103 @@ export async function POST(req: NextRequest | Request): Promise<Response> {
 
       conversationId = conv.id;
       conversationStatus = conv.status;
+      conversationAlreadyExists = true;
     } else {
+      // For non-emergencies, create the conversation only after rate-limit checks.
+      // For emergencies, we create it now so we can persist and mark handed_off.
+      conversationId = ""; // will be filled below
+      conversationAlreadyExists = false;
+    }
+
+    // ── STEP G: Handle emergency path ───────────────────────────────────────
+    if (emergencyKind !== null) {
+      // Create conversation now if it doesn't exist yet
+      if (!conversationAlreadyExists) {
+        const { data: newConv, error: createConvErr } = await supabase
+          .from("conversations")
+          .insert({ clinic_id: clinicId, status: "active" })
+          .select("id, status")
+          .single();
+
+        if (createConvErr || !newConv) {
+          console.error(
+            "[Chat API Error] Failed to create emergency conversation:",
+            sanitizeForLogs(createConvErr)
+          );
+          return NextResponse.json({ error: "Failed to create conversation" }, { status: 500 });
+        }
+        conversationId = newConv.id;
+        conversationStatus = newConv.status;
+      }
+
+      // Persist user message
+      await supabase.from("messages").insert({
+        conversation_id: conversationId,
+        role: "user",
+        content: message,
+      });
+
+      // Mark conversation as handed_off (idempotent)
+      await supabase
+        .from("conversations")
+        .update({ status: "handed_off" })
+        .eq("id", conversationId);
+
+      // Build and persist the fixed reply
+      const emergencyReply =
+        emergencyKind === "self_harm"
+          ? buildSelfHarmReply(clinic.handoff_phone)
+          : buildMedicalEmergencyReply(clinic.handoff_phone);
+
+      await supabase.from("messages").insert({
+        conversation_id: conversationId,
+        role: "assistant",
+        content: emergencyReply,
+      });
+
+      return new Response(emergencyReply, {
+        status: 200,
+        headers: {
+          "Content-Type": "text/plain; charset=utf-8",
+          "X-Conversation-Id": conversationId,
+        },
+      });
+    }
+
+    // ── STEP H: DB-backed rate limits (non-emergency only) ──────────────────
+    // Run BEFORE creating/persisting anything so rejected requests write nothing.
+    if (conversationAlreadyExists) {
+      // Per-conversation limits (burst + total)
+      const convLimit = await checkConversationRateLimit(
+        supabase,
+        conversationId,
+        rateLimitConfig
+      );
+      if (convLimit.exceeded) {
+        return new Response(build429Message(), {
+          status: 429,
+          headers: {
+            "Content-Type": "text/plain; charset=utf-8",
+            "X-Conversation-Id": conversationId,
+          },
+        });
+      }
+    }
+
+    // Per-clinic hourly limit (applies whether conversation is new or existing)
+    const clinicLimitExceeded = await checkClinicRateLimit(supabase, clinicId, rateLimitConfig);
+    if (clinicLimitExceeded) {
+      return new Response(build429Message(), {
+        status: 429,
+        headers: {
+          "Content-Type": "text/plain; charset=utf-8",
+          ...(conversationAlreadyExists ? { "X-Conversation-Id": conversationId } : {}),
+        },
+      });
+    }
+
+    // ── STEP I: Create conversation (if new) ─────────────────────────────────
+    if (!conversationAlreadyExists) {
       const { data: newConv, error: createConvErr } = await supabase
         .from("conversations")
         .insert({ clinic_id: clinicId, status: "active" })
@@ -142,7 +270,7 @@ export async function POST(req: NextRequest | Request): Promise<Response> {
       conversationStatus = newConv.status;
     }
 
-    // E. Persist incoming user message
+    // ── STEP J: Persist incoming user message ────────────────────────────────
     const { error: userMsgErr } = await supabase.from("messages").insert({
       conversation_id: conversationId,
       role: "user",
@@ -157,11 +285,11 @@ export async function POST(req: NextRequest | Request): Promise<Response> {
       return NextResponse.json({ error: "Failed to record message" }, { status: 500 });
     }
 
-    // F. If conversation is handed_off or closed, return fixed message without calling LLM
+    // ── STEP K: Handed-off / closed conversations ────────────────────────────
     if (conversationStatus === "handed_off" || conversationStatus === "closed") {
       const handoffReply = clinic.handoff_phone
-        ? `A member of our clinic team will contact you shortly. If urgent, you can reach us at ${clinic.handoff_phone}.`
-        : `A member of our clinic team will contact you shortly.`;
+        ? `A member of our clinic team will contact you shortly. If urgent, you can reach us at ${clinic.handoff_phone}. You can also start a new chat here if you need to book an appointment.`
+        : `A member of our clinic team will contact you shortly. You can also start a new chat here if you need to book an appointment.`;
 
       return new Response(handoffReply, {
         status: 200,
@@ -172,7 +300,7 @@ export async function POST(req: NextRequest | Request): Promise<Response> {
       });
     }
 
-    // G. Load conversation history (last 20 messages, chronological order)
+    // ── STEP L: Load conversation history (last 20 messages) ─────────────────
     const { data: recentMsgs, error: histErr } = await supabase
       .from("messages")
       .select("role, content")
@@ -184,7 +312,7 @@ export async function POST(req: NextRequest | Request): Promise<Response> {
       console.error("[Chat API Error] Failed to load history:", sanitizeForLogs(histErr));
     }
 
-    // DECISIONS.md: History replays message text only, not tool results.
+    // DECISIONS.md §11: History replays message text only, not tool results.
     const historyRows = (recentMsgs || []).reverse();
     const modelMessages = historyRows
       .filter((m) => m.role === "user" || m.role === "assistant")
@@ -193,7 +321,7 @@ export async function POST(req: NextRequest | Request): Promise<Response> {
         content: m.content || "",
       }));
 
-    // H. Configure system prompt and tools
+    // ── STEP M: Configure system prompt and tools ─────────────────────────────
     const systemPrompt = buildSystemPrompt({
       clinicName: clinic.name,
       timezone: clinic.timezone,
@@ -219,7 +347,7 @@ export async function POST(req: NextRequest | Request): Promise<Response> {
       }
     }
 
-    // I. Model Fallback Execution Loop
+    // ── STEP N: Model Fallback Execution Loop ─────────────────────────────────
     const modelIds = getModelIds();
     let successfulStreamResult: any = null;
     let successfulReader: any = null;
@@ -336,8 +464,7 @@ export async function POST(req: NextRequest | Request): Promise<Response> {
             sanitizeForLogs(streamError)
           );
 
-          // Rule 1: Fail over to the next model only if the failed attempt has produced NO output of any kind
-          // (no text and no tool call executed). Once any tool call has executed, never retry on another model.
+          // Rule: Fail over only if no output produced AND no tool executed.
           if (toolCallExecuted || hasProducedOutput) {
             break;
           }
@@ -373,7 +500,7 @@ export async function POST(req: NextRequest | Request): Promise<Response> {
       }
     }
 
-    // J. If all models failed or execution failed after output/tool execution:
+    // ── STEP O: If all models failed ─────────────────────────────────────────
     if (!successfulStreamResult) {
       const friendly503 = "We're very busy, please try again in a minute";
       try {
@@ -402,14 +529,14 @@ export async function POST(req: NextRequest | Request): Promise<Response> {
       });
     }
 
-    // K. Keep consuming the stream in the background even if client disconnects
+    // ── STEP P: Keep consuming the stream in background if client disconnects ─
     if (typeof successfulStreamResult.consumeStream === "function") {
       Promise.resolve(successfulStreamResult.consumeStream()).catch((consumeErr: unknown) => {
         console.error("[Chat API Background Stream Error]:", sanitizeForLogs(consumeErr));
       });
     }
 
-    // L. Stream response to client starting from the peeked first chunk
+    // ── STEP Q: Stream response to client ────────────────────────────────────
     const textEncoder = new TextEncoder();
     const responseStream = new ReadableStream({
       async start(controller) {

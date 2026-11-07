@@ -52,3 +52,23 @@
 - **Context:** Primary LLM calls can fail due to provider rate limits (429), temporary service unavailability (503), or network/first-token timeouts.
 - **Decision:** Models are sequenced from `LLM_MODEL` followed by `LLM_FALLBACK_MODELS`. Each attempt is bounded with `maxRetries: 0`, and the overall request has a 25-second ceiling. Failover to the next model occurs only if the failed attempt produced zero output (no text and no tool execution initiated). Once any tool has executed (such as booking or cancelling an appointment) or text has streamed, model switching is strictly forbidden to prevent duplicate side effects and mid-stream context fragmentation; in such cases, a friendly 503 fallback message is returned and persisted.
 
+
+### 14. In-Memory Per-IP Rate Limit & Header Trust (Week 3, Part B)
+- **Context:** A per-IP rate limit is needed to defend against abuse. No new database table is permitted, and serverless deployments don't share memory across instances.
+- **Decision:** A module-level `Map<string, { count, windowStart }>` is used for a 30-request / 10-minute per-IP window. The map is pruned when it exceeds 10,000 entries, and expired entries are removed on each request.
+- **IP extraction:** The client IP is taken from the `X-Forwarded-For` header (first address, leftmost = client on a trusted proxy), falling back to `X-Real-IP`. If neither header is present (e.g. direct local requests in development), the request is **allowed through** rather than blocked, to avoid locking out all local dev traffic.
+- **Spoofing caveat:** `X-Forwarded-For` can be spoofed by clients not behind a trusted reverse proxy. This limit is best-effort abuse deterrence, not a security boundary. Supabase-backed per-clinic and per-conversation limits provide the authoritative protection.
+- **Serverless caveat:** On Vercel serverless, each function instance has its own process memory. The in-memory limit is per-instance and is noted as best-effort in code comments and this file.
+- **Relaxed mode:** Setting `RATE_LIMIT_RELAXED=true` in the environment (or in `.env.local`) raises all limits to very high values for local development. Tests inject their own tiny limits via `setRateLimitOverride`.
+
+### 15. Emergency False-Positive Policy (Week 3, Part B)
+- **Context:** Emergency phrase matching may trigger on historical or hypothetical statements (e.g. "I had chest pain last year").
+- **Decision:** False positives are explicitly acceptable. Emergency safety takes absolute precedence over minor UX friction. A patient who reads the emergency reply for a non-emergency can simply continue the conversation (the conversation is marked `handed_off`, so they would start a new chat). The phrase list is maintained in `src/lib/guardrails/emergency-phrases.ts` and is normalised before matching (NFKC, lowercase, punctuation stripped, whitespace collapsed) to maximise recall across spelling variants.
+
+### 16. Rate Limits Without a Migration (Week 3, Part B)
+- **Context:** Per-conversation and per-clinic rate limits are needed without adding new database tables.
+- **Decision:** All database-backed limits use `COUNT` queries on the existing `messages` table with `role = 'user'` and timestamp filters. The per-clinic hourly limit uses a Supabase join through the `conversations` foreign key (`messages → conversations.clinic_id`). Counts are checked **before** any `INSERT` so rejected requests write nothing to the database (clean audit trail).
+
+### 17. Prompt Injection Resistance Strategy (Week 3, Part B)
+- **Context:** Tool results containing phrases like "ignore previous instructions" must not change the model's behaviour.
+- **Decision:** The system prompt includes an explicit injection resistance section instructing the model to treat all user and tool content as data. Real injection resistance is measured in the eval suite (Week 5) with dedicated adversarial scenarios. Unit tests verify that tool call results are delivered to the model as `tool` role messages (the AI SDK's structured message format), not as `user` or `system` text — this means injection attempts arrive in a structurally distinct channel that well-aligned models are trained to treat as data.
