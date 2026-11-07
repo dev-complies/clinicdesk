@@ -39,3 +39,16 @@
 ### 10. Atomic Cancel & Reschedule with Optimistic Concurrency Guards
 - **Context:** Concurrent calls to cancel or reschedule the same appointment must not corrupt data or produce duplicate slots.
 - **Decision:** Both operations execute as a single SQL `UPDATE ... WHERE id = :id AND clinic_id = :clinicId AND status = 'booked' AND start_at = :originalStartAt AND start_at > :now`. If zero rows are affected, a re-read determines the precise error (`ALREADY_CANCELLED`, `APPOINTMENT_NOT_CANCELLABLE`, or `APPOINTMENT_NOT_FOUND`). For reschedule, double-booking collisions during the UPDATE trigger `23505` on `appointments_no_double_booking`, returning `SLOT_TAKEN` while preserving the original appointment untouched.
+
+### 11. History Replay Message Text Only (Week 3, Part A)
+- **Context:** When loading the last 20 messages of conversation history to feed into `streamText`, historical assistant turns contain both conversational text and detailed `tool_calls` JSON structures.
+- **Decision:** History replays message text only (`role: 'user'` and `role: 'assistant'`), omitting historical raw tool results. Full tool traces are preserved in `messages.tool_calls` for auditing, debugging, and evaluation metrics, but replaying textual turns provides complete conversational context without inflating prompt token counts or risking cross-turn schema drift.
+
+### 12. Guaranteed Background Stream Persistence
+- **Context:** Streaming LLM tokens to the client can be abruptly aborted if the user navigates away or disconnects their client connection mid-response.
+- **Decision:** In `POST /api/chat`, `result.toTextStreamResponse()` is returned to the client while `result.consumeStream()` runs in the server background. This guarantees that model tool calling, token accounting, and database persistence in `onEnd` complete reliably regardless of client connection lifecycle.
+
+### 13. Model Resiliency, Fallback Sequencing & Bounded Failover
+- **Context:** Primary LLM calls can fail due to provider rate limits (429), temporary service unavailability (503), or network/first-token timeouts.
+- **Decision:** Models are sequenced from `LLM_MODEL` followed by `LLM_FALLBACK_MODELS`. Each attempt is bounded with `maxRetries: 0`, and the overall request has a 25-second ceiling. Failover to the next model occurs only if the failed attempt produced zero output (no text and no tool execution initiated). Once any tool has executed (such as booking or cancelling an appointment) or text has streamed, model switching is strictly forbidden to prevent duplicate side effects and mid-stream context fragmentation; in such cases, a friendly 503 fallback message is returned and persisted.
+

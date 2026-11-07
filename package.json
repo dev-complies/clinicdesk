@@ -10,8 +10,10 @@
     "test": "vitest run"
   },
   "dependencies": {
+    "@ai-sdk/google": "^4.0.113",
     "@supabase/ssr": "^0.12.7",
     "@supabase/supabase-js": "^2.119.0",
+    "ai": "^7.0.164",
     "luxon": "^3.7.2",
     "next": "16.4.5",
     "react": "19.3.0",
