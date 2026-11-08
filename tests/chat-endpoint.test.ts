@@ -414,7 +414,7 @@ describe("POST /api/chat - Core Chat Endpoint & Resiliency", () => {
     const tools = createChatTools("dummy-clinic-id", "dummy-conv-id");
 
     const toolKeys = Object.keys(tools) as Array<keyof typeof tools>;
-    expect(toolKeys.length).toBe(7);
+    expect(toolKeys.length).toBe(8);
 
     for (const key of toolKeys) {
       const toolDef = tools[key];

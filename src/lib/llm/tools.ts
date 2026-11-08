@@ -6,7 +6,16 @@ import { findMyAppointments, findMyAppointmentsInputSchema } from "../tools/find
 import { handoffToHuman, handoffToHumanInputSchema } from "../tools/handoff-to-human";
 import { listDoctors, listDoctorsInputSchema } from "../tools/list-doctors";
 import { rescheduleAppointment, rescheduleAppointmentInputSchema } from "../tools/reschedule-appointment";
+import {
+  searchClinicInfo,
+  searchClinicInfoInputSchema,
+  SearchClinicInfoRetrievalMeta,
+} from "../tools/search-clinic-info";
 import { ToolResult } from "../tools/types";
+
+export interface ChatToolsOptions {
+  onRetrieval?: (meta: SearchClinicInfoRetrievalMeta) => void;
+}
 
 /**
  * Creates the model-facing tool registry for a chat turn.
@@ -16,8 +25,44 @@ import { ToolResult } from "../tools/types";
  * Every tool execute function catches unexpected errors and returns
  * structured ToolResult error objects without throwing.
  */
-export function createChatTools(clinicId: string, conversationId: string) {
+export function createChatTools(
+  clinicId: string,
+  conversationId: string,
+  options?: ChatToolsOptions
+) {
   return {
+    search_clinic_info: tool({
+      description:
+        "Search clinic documents for information on timings, fees for services/tests, policies, location, parking, facilities, and general clinic rules. " +
+        "The query must never contain names, phone numbers, or other personal details. " +
+        "Write the query as a short plain-English search phrase (keep the meaning, drop filler words) even if the patient wrote in Hindi or Hinglish; the final answer is still written in the patient's language.",
+      inputSchema: searchClinicInfoInputSchema,
+      execute: async (input): Promise<ToolResult<any>> => {
+        try {
+          const res = await searchClinicInfo(clinicId, input);
+          if (res.retrievalMeta && options?.onRetrieval) {
+            options.onRetrieval(res.retrievalMeta);
+          }
+          if (res.ok) {
+            return {
+              ok: true,
+              data: res.data,
+            };
+          }
+          return {
+            ok: false,
+            error: res.error,
+            message: res.message,
+          };
+        } catch (err: any) {
+          return {
+            ok: false,
+            error: "INTERNAL_ERROR",
+            message: "Failed to search clinic information. Please try again or ask clinic staff.",
+          };
+        }
+      },
+    }),
     list_doctors: tool({
       description:
         "List active doctors at the clinic, optionally filtered by medical speciality. " +

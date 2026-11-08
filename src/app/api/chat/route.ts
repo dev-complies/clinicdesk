@@ -18,6 +18,7 @@ import { getChatModel, getModelIds } from "../../../lib/llm/model";
 import { resolveClinicId } from "../../../lib/llm/resolve-clinic";
 import { buildSystemPrompt } from "../../../lib/llm/system-prompt";
 import { createChatTools } from "../../../lib/llm/tools";
+import { SearchClinicInfoRetrievalMeta } from "../../../lib/tools/search-clinic-info";
 import { getAdminClient } from "../../../lib/supabase/admin";
 
 // 1. Request body schema: conversation_id is optional UUID, message is 1-1000 trimmed chars.
@@ -327,7 +328,11 @@ export async function POST(req: NextRequest | Request): Promise<Response> {
       timezone: clinic.timezone,
     });
 
-    const tools = createChatTools(clinicId, conversationId);
+    // Per-request retrieval metadata collector strictly scoped to this request handler closure
+    const requestRetrievals: SearchClinicInfoRetrievalMeta[] = [];
+    const tools = createChatTools(clinicId, conversationId, {
+      onRetrieval: (meta) => requestRetrievals.push(meta),
+    });
 
     // Provider options: only configure thinking budget if LLM_THINKING_BUDGET is defined
     let providerOptions: Record<string, any> | undefined = undefined;
@@ -411,14 +416,45 @@ export async function POST(req: NextRequest | Request): Promise<Response> {
                     const resultObj: any = (s.toolResults || []).find(
                       (tr: any) => tr.toolCallId === tc.toolCallId
                     );
+                    let resultData = resultObj?.output ?? resultObj?.result;
+
+                    // If search_clinic_info, persist retrieval metadata instead of full passage text
+                    if (tc.toolName === "search_clinic_info") {
+                      const inputQuery = (tc.input ?? tc.args)?.query;
+                      const matchedMeta = requestRetrievals.find((m) => m.query === inputQuery);
+                      if (resultData?.ok) {
+                        resultData = {
+                          ok: true,
+                          query: inputQuery,
+                          source_titles: matchedMeta?.sourceTitles ?? [],
+                          chunk_ids: matchedMeta?.chunkIds ?? [],
+                        };
+                      }
+                    }
+
                     return {
                       toolCallId: tc.toolCallId,
                       toolName: tc.toolName,
                       args: tc.input ?? tc.args,
-                      result: resultObj?.output ?? resultObj?.result,
+                      result: resultData,
                     };
                   })
                 ) || [];
+
+              if (requestRetrievals.length > 0) {
+                const totalEmbedMs = requestRetrievals.reduce(
+                  (acc, r) => acc + (r.embedDurationMs ?? 0),
+                  0
+                );
+                const totalSearchMs = requestRetrievals.reduce(
+                  (acc, r) => acc + (r.searchDurationMs ?? 0),
+                  0
+                );
+                const modelDurationMs = Math.max(0, latencyMs - totalEmbedMs - totalSearchMs);
+                console.log(
+                  `[search request timing] total=${latencyMs}ms embed=${totalEmbedMs}ms match_chunks=${totalSearchMs}ms model=${modelDurationMs}ms searches=${requestRetrievals.length}`
+                );
+              }
 
               await supabase.from("messages").insert({
                 conversation_id: conversationId,

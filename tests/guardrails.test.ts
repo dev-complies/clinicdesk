@@ -162,6 +162,18 @@ describe("Guardrails – Emergency, Rate Limits, Prompt", () => {
       expect(prompt).toMatch(/mask/i);
       expect(prompt).toMatch(/phone number used at booking/i);
     });
+
+    it("contains clinic info grounding, tools-win-over-documents, failure handoff, and 2-call limit rules", () => {
+      const prompt = buildSystemPrompt({ clinicName: "Test Clinic", timezone: "Asia/Kolkata" });
+      expect(prompt).toMatch(/search_clinic_info first/i);
+      expect(prompt).toMatch(/answer ONLY from the returned passages/i);
+      expect(prompt).toMatch(/doctor names, consultation fees and availability come only from list_doctors and check_availability/i);
+      expect(prompt).toMatch(/prices and details of other services.*come only from clinic documents via search_clinic_info/i);
+      expect(prompt).toMatch(/if the two disagree about doctors, fees or availability, the tools win/i);
+      expect(prompt).toMatch(/if search_clinic_info returns ok:false/i);
+      expect(prompt).toMatch(/never answer from memory/i);
+      expect(prompt).toMatch(/at most 2 times in a single turn/i);
+    });
   });
 
   // =========================================================================
