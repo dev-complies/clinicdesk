@@ -1,0 +1,23 @@
+{
+  "timestamp": "2026-11-08T07:07:20.854Z",
+  "git_sha": "61fccb4390f0d02805839e3b0be4dd532ee96a2a",
+  "model_id": "gemini-3.5-flash",
+  "system_prompt_hash": "84179aeecf9e29c2",
+  "scenario_files_hash": "3957a49e84ef8366",
+  "total": 1,
+  "evaluated": 1,
+  "passed": 1,
+  "failed": 0,
+  "infra_errors": 0,
+  "flaky": 0,
+  "pass_rate": 1,
+  "categories": [
+    {
+      "category": "faq",
+      "total": 1,
+      "passed": 1,
+      "infra_errors": 0,
+      "pass_rate": 1
+    }
+  ]
+}

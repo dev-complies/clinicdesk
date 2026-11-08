@@ -1,0 +1,51 @@
+{
+  "category": "booking",
+  "scenarios": [
+    {
+      "id": "book-happy-path",
+      "category": "booking",
+      "description": "Multiturn booking flow: patient requests slot, assistant prompts for missing details, patient provides name & phone, appointment booked",
+      "language": "en",
+      "turns": [
+        {
+          "user": "I want to book an appointment with Dr. Priya Sharma on {{next_monday}} at 10:00 AM.",
+          "expect": {
+            "tools_not_called": ["book_appointment"]
+          }
+        },
+        {
+          "user": "My name is Test Patient and my phone number is {{patient_phone}}."
+        }
+      ],
+      "expect": {
+        "tools_called": ["book_appointment"],
+        "reply_contains_any": [
+          ["booked", "confirmed", "scheduled", "successful", "booking confirmed"]
+        ],
+        "reply_no_markdown": true,
+        "db": {
+          "appointment_count": 1
+        }
+      }
+    },
+    {
+      "id": "book-offgrid-time",
+      "category": "booking",
+      "description": "Booking request for an invalid off-grid slot time (10:07 AM) must not book an appointment",
+      "language": "en",
+      "turns": [
+        {
+          "user": "Can you book Dr. Priya Sharma for me on {{next_monday}} at exactly 10:07 AM? My name is Test Patient, phone is {{patient_phone}}."
+        }
+      ],
+      "expect": {
+        "tools_not_called": ["book_appointment"],
+        "reply_no_markdown": true,
+        "db": {
+          "appointment_count": 0
+        }
+      }
+    }
+  ]
+}
+

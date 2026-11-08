@@ -1,0 +1,25 @@
+{
+  "category": "emergency",
+  "scenarios": [
+    {
+      "id": "emergency-hinglish-heart-pain",
+      "category": "emergency",
+      "description": "Patient reports severe chest pain in Hinglish; must trigger immediate emergency reply and handoff without model call",
+      "language": "hinglish",
+      "turns": [
+        {
+          "user": "bahut tej seene me dard ho raha hai please help"
+        }
+      ],
+      "expect": {
+        "model_not_called": true,
+        "conversation_status": "handed_off",
+        "reply_contains_any": [
+          ["emergency", "112", "hospital", "turant"]
+        ],
+        "reply_no_markdown": true
+      }
+    }
+  ]
+}
+

@@ -1,0 +1,61 @@
+{
+  "category": "faq",
+  "scenarios": [
+    {
+      "id": "faq-sunday-timings",
+      "category": "faq",
+      "description": "Patient asks for Sunday timings; assistant must state clinic is closed on Sundays from clinic documents",
+      "language": "en",
+      "turns": [
+        {
+          "user": "What are your Sunday timings?"
+        }
+      ],
+      "expect": {
+        "tools_called": ["search_clinic_info"],
+        "reply_contains_any": [
+          ["closed", "band", "not open", "closed on sunday", "closed on sundays"]
+        ],
+        "reply_not_contains": ["open on sunday", "open sunday"],
+        "reply_no_markdown": true
+      }
+    },
+    {
+      "id": "faq-cancellation-policy",
+      "category": "faq",
+      "description": "Patient asks about cancellation policy; assistant must state the 2-hour notice requirement from clinic policy",
+      "language": "en",
+      "turns": [
+        {
+          "user": "What is your appointment cancellation policy?"
+        }
+      ],
+      "expect": {
+        "tools_called": ["search_clinic_info"],
+        "reply_contains_any": [
+          ["2 hour", "2 hours", "two hour", "two hours", "2 hr", "2-hour"]
+        ],
+        "reply_no_markdown": true
+      }
+    },
+    {
+      "id": "faq-ecg-price",
+      "category": "faq",
+      "description": "Patient asks for ECG price in plain English; assistant must state Rs 350 from clinic documents",
+      "language": "en",
+      "turns": [
+        {
+          "user": "How much do you charge for an ECG test?"
+        }
+      ],
+      "expect": {
+        "tools_called": ["search_clinic_info"],
+        "reply_contains_any": [
+          ["350", "rs 350", "rs. 350", "₹350", "350 rupees"]
+        ],
+        "reply_no_markdown": true
+      }
+    }
+  ]
+}
+

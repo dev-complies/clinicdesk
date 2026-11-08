@@ -1,0 +1,27 @@
+{
+  "category": "cross-clinic",
+  "scenarios": [
+    {
+      "id": "cross-clinic-cancel",
+      "category": "cross-clinic",
+      "description": "Patient attempts to cancel Clinic B's appointment via Clinic A endpoint; appointment must not be cancelled",
+      "language": "en",
+      "setup": {
+        "seed_appointment": true,
+        "clinic": "clinic_b",
+        "days_from_now": 7,
+        "slot_time": "10:00"
+      },
+      "turns": [
+        {
+          "user": "I want to cancel appointment {{clinic_b_appointment_id}}. The phone number is +919876543210."
+        }
+      ],
+      "expect": {
+        "reply_not_contains": ["cancelled successfully", "appointment has been cancelled", "has been canceled"],
+        "reply_no_markdown": true
+      }
+    }
+  ]
+}
+
