@@ -6,6 +6,7 @@
  *   npx tsx evals/run.ts [--category booking] [--id book-001] [--repeat 3] [--yes] [--allow-fallback]
  */
 
+import "./stub-server-only";
 import crypto from "crypto";
 import { execSync } from "child_process";
 import * as dotenv from "dotenv";
@@ -94,40 +95,7 @@ export async function main() {
 
   console.log("\n[ClinicDesk Evals] Initializing evaluation runner...");
 
-  // 1. Model Pinning (Error if neither EVAL_MODEL nor LLM_MODEL is set)
-  const evalModel = (process.env.EVAL_MODEL || process.env.LLM_MODEL || "").trim();
-  if (!evalModel) {
-    console.error(
-      "\n[Fatal Error] Neither EVAL_MODEL nor LLM_MODEL is set. Please set EVAL_MODEL or LLM_MODEL in .env.local.\n"
-    );
-    process.exit(1);
-  }
-  process.env.LLM_MODEL = evalModel;
-
-  if (!options.allowFallback) {
-    delete process.env.LLM_FALLBACK_MODELS;
-  }
-
-  // 2. Safety Guard (Verify target clinics and project host)
-  const supabase = getAdminClient();
-  let safety: { clinicAId: string; clinicBId: string; projectHost: string };
-  try {
-    safety = await runSafetyGuard(supabase, { yes: options.yes });
-  } catch (err: any) {
-    console.error(`\n${err.message}\n`);
-    process.exit(1);
-  }
-
-  // 3. Relax Rate Limits for in-process evaluations
-  process.env.RATE_LIMIT_RELAXED = "true";
-
-  // 4. Capture Pre-run Database Row Counts
-  const preCounts = await fetchDatabaseCounts(supabase);
-  console.log(
-    `[Baseline Counts] docs=${preCounts.documents} chunks=${preCounts.chunks} msgs=${preCounts.messages} convs=${preCounts.conversations} appts=${preCounts.appointments} patients=${preCounts.patients}`
-  );
-
-  // 5. Load and Filter Scenarios
+  // Load and filter scenarios first (offline: needs no keys, no network, no database)
   let scenarios = loadAllScenarios(scenariosDir);
   if (options.category) {
     scenarios = scenarios.filter(
@@ -183,6 +151,39 @@ export async function main() {
     console.log("===============================================================================\n");
     process.exit(0);
   }
+
+  // 1. Model Pinning (Error if neither EVAL_MODEL nor LLM_MODEL is set)
+  const evalModel = (process.env.EVAL_MODEL || process.env.LLM_MODEL || "").trim();
+  if (!evalModel) {
+    console.error(
+      "\n[Fatal Error] Neither EVAL_MODEL nor LLM_MODEL is set. Please set EVAL_MODEL or LLM_MODEL in .env.local.\n"
+    );
+    process.exit(1);
+  }
+  process.env.LLM_MODEL = evalModel;
+
+  if (!options.allowFallback) {
+    delete process.env.LLM_FALLBACK_MODELS;
+  }
+
+  // 2. Safety Guard (Verify target clinics and project host)
+  const supabase = getAdminClient();
+  let safety: { clinicAId: string; clinicBId: string; projectHost: string };
+  try {
+    safety = await runSafetyGuard(supabase, { yes: options.yes });
+  } catch (err: any) {
+    console.error(`\n${err.message}\n`);
+    process.exit(1);
+  }
+
+  // 3. Relax Rate Limits for in-process evaluations
+  process.env.RATE_LIMIT_RELAXED = "true";
+
+  // 4. Capture Pre-run Database Row Counts
+  const preCounts = await fetchDatabaseCounts(supabase);
+  console.log(
+    `[Baseline Counts] docs=${preCounts.documents} chunks=${preCounts.chunks} msgs=${preCounts.messages} convs=${preCounts.conversations} appts=${preCounts.appointments} patients=${preCounts.patients}`
+  );
 
   const repeatCount = Math.max(1, options.repeat ?? 1);
   const scenarioSummaries: ScenarioSummary[] = [];

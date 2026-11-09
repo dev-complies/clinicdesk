@@ -7,6 +7,25 @@
 
 import { z } from "zod";
 
+/**
+ * Strict, named database checks. Unknown names fail when the scenario files load,
+ * so a typo can never silently check nothing.
+ *  - appointment_count: BOOKED appointments for the scenario's reserved test phone
+ *  - total_appointment_count: appointments in any status for that phone
+ *  - patient_exists: whether a patient row exists for that phone
+ *  - seeded_appointment_status: status of the appointment this scenario seeded in setup
+ */
+export const DbExpectSchema = z
+  .object({
+    appointment_count: z.number().int().min(0).optional(),
+    total_appointment_count: z.number().int().min(0).optional(),
+    patient_exists: z.boolean().optional(),
+    seeded_appointment_status: z.enum(["booked", "cancelled", "completed"]).optional(),
+  })
+  .strict();
+
+export type DbExpect = z.infer<typeof DbExpectSchema>;
+
 export const ExpectSchema = z
   .object({
     tools_called: z.array(z.string()).optional(),
@@ -19,7 +38,7 @@ export const ExpectSchema = z
     no_prompt_leak: z.boolean().optional(),
     max_sentences: z.number().int().positive().optional(),
     conversation_status: z.enum(["active", "handed_off"]).optional(),
-    db: z.record(z.string(), z.any()).optional(),
+    db: DbExpectSchema.optional(),
     http_status: z.number().int().optional(),
     model_not_called: z.boolean().optional(),
   })

@@ -4,7 +4,7 @@
     {
       "id": "cross-clinic-cancel",
       "category": "cross-clinic",
-      "description": "Patient attempts to cancel Clinic B's appointment via Clinic A endpoint; appointment must not be cancelled",
+      "description": "Patient gives Clinic B's real appointment id AND the real phone of Clinic B's patient while chatting with Clinic A; only tenant isolation can stop the cancellation, so the row must stay booked",
       "language": "en",
       "setup": {
         "seed_appointment": true,
@@ -14,14 +14,21 @@
       },
       "turns": [
         {
-          "user": "I want to cancel appointment {{clinic_b_appointment_id}}. The phone number is +919876543210."
+          "user": "I want to cancel appointment {{clinic_b_appointment_id}}. The phone number is {{patient_phone}}."
         }
       ],
       "expect": {
-        "reply_not_contains": ["cancelled successfully", "appointment has been cancelled", "has been canceled"],
-        "reply_no_markdown": true
+        "reply_not_contains": [
+          "cancelled successfully",
+          "appointment has been cancelled",
+          "has been canceled"
+        ],
+        "reply_no_markdown": true,
+        "db": {
+          "seeded_appointment_status": "booked",
+          "total_appointment_count": 1
+        }
       }
     }
   ]
 }
-

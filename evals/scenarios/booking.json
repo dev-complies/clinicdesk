@@ -4,23 +4,28 @@
     {
       "id": "book-happy-path",
       "category": "booking",
-      "description": "Multiturn booking flow: patient requests slot, assistant prompts for missing details, patient provides name & phone, appointment booked",
+      "description": "Patient gives all details in one message, then confirms; assistant must check availability before booking and the appointment must exist in the database",
       "language": "en",
       "turns": [
         {
-          "user": "I want to book an appointment with Dr. Priya Sharma on {{next_monday}} at 10:00 AM.",
-          "expect": {
-            "tools_not_called": ["book_appointment"]
-          }
+          "user": "I want to book Dr. Priya Sharma on {{next_monday}} at 10:00 AM. My name is Test Patient and my phone number is {{patient_phone}}."
         },
         {
-          "user": "My name is Test Patient and my phone number is {{patient_phone}}."
+          "user": "Yes, please confirm the booking."
         }
       ],
       "expect": {
-        "tools_called": ["book_appointment"],
+        "tools_called_in_order": [
+          "check_availability",
+          "book_appointment"
+        ],
         "reply_contains_any": [
-          ["booked", "confirmed", "scheduled", "successful", "booking confirmed"]
+          [
+            "booked",
+            "confirmed",
+            "scheduled",
+            "successful"
+          ]
         ],
         "reply_no_markdown": true,
         "db": {
@@ -39,7 +44,9 @@
         }
       ],
       "expect": {
-        "tools_not_called": ["book_appointment"],
+        "tools_not_called": [
+          "book_appointment"
+        ],
         "reply_no_markdown": true,
         "db": {
           "appointment_count": 0
@@ -48,4 +55,3 @@
     }
   ]
 }
-

@@ -17,6 +17,8 @@ export interface CheckContext {
   conversationStatus?: string;
   modelCalled: boolean;
   patientPhone: string;
+  /** id of the appointment seeded by the scenario's setup, if any */
+  seededAppointmentId?: string;
   supabase: SupabaseClient;
   systemPromptText?: string;
 }
@@ -255,65 +257,94 @@ export async function evaluateExpectations(
     }
   }
 
-  // 12. db checks (strict named checks)
+  // 12. db checks (strict named checks; any query error FAILS the check, never passes silently)
   if (expect.db) {
-    const ALLOWED_DB_CHECKS = [
-      "appointment_count",
-      "total_appointment_count",
-      "patient_exists",
-    ];
+    const db = expect.db;
 
-    for (const [key, expectedVal] of Object.entries(expect.db)) {
-      if (!ALLOWED_DB_CHECKS.includes(key)) {
-        return {
-          pass: false,
-          reason: `Unknown DB check '${key}'. Allowed checks: [${ALLOWED_DB_CHECKS.join(", ")}]`,
-        };
-      }
+    let patientIds: string[] | null = null;
+    const getPatientIds = async (): Promise<string[]> => {
+      if (patientIds) return patientIds;
+      const { data, error } = await context.supabase
+        .from("patients")
+        .select("id")
+        .eq("phone", context.patientPhone);
+      if (error) throw new Error(`patients query failed: ${error.message}`);
+      patientIds = (data ?? []).map((r: { id: string }) => r.id);
+      return patientIds;
+    };
 
-      if (key === "appointment_count" || key === "total_appointment_count") {
-        const { data: patient } = await context.supabase
-          .from("patients")
-          .select("id")
-          .eq("phone", context.patientPhone)
-          .maybeSingle();
+    const countAppointments = async (bookedOnly: boolean): Promise<number> => {
+      const ids = await getPatientIds();
+      if (ids.length === 0) return 0;
+      let query = context.supabase
+        .from("appointments")
+        .select("id", { count: "exact", head: true })
+        .in("patient_id", ids);
+      if (bookedOnly) query = query.eq("status", "booked");
+      const { count, error } = await query;
+      if (error) throw new Error(`appointments query failed: ${error.message}`);
+      return count ?? 0;
+    };
 
-        let count = 0;
-        if (patient) {
-          const query = context.supabase
-            .from("appointments")
-            .select("id", { count: "exact", head: true })
-            .eq("patient_id", patient.id);
-
-          if (key === "appointment_count") {
-            query.eq("status", "scheduled");
-          }
-
-          const { count: apptCount } = await query;
-          count = apptCount ?? 0;
-        }
-
-        if (count !== expectedVal) {
+    try {
+      if (db.appointment_count !== undefined) {
+        const n = await countAppointments(true);
+        if (n !== db.appointment_count) {
           return {
             pass: false,
-            reason: `Expected DB ${key} ${expectedVal}, but found ${count}`,
-          };
-        }
-      } else if (key === "patient_exists") {
-        const { data: patient } = await context.supabase
-          .from("patients")
-          .select("id")
-          .eq("phone", context.patientPhone)
-          .maybeSingle();
-
-        const exists = !!patient;
-        if (exists !== expectedVal) {
-          return {
-            pass: false,
-            reason: `Expected DB patient_exists ${expectedVal}, but got ${exists}`,
+            reason: `Expected DB appointment_count (booked) ${db.appointment_count}, but found ${n}`,
           };
         }
       }
+
+      if (db.total_appointment_count !== undefined) {
+        const n = await countAppointments(false);
+        if (n !== db.total_appointment_count) {
+          return {
+            pass: false,
+            reason: `Expected DB total_appointment_count ${db.total_appointment_count}, but found ${n}`,
+          };
+        }
+      }
+
+      if (db.patient_exists !== undefined) {
+        const exists = (await getPatientIds()).length > 0;
+        if (exists !== db.patient_exists) {
+          return {
+            pass: false,
+            reason: `Expected DB patient_exists ${db.patient_exists}, but got ${exists}`,
+          };
+        }
+      }
+
+      if (db.seeded_appointment_status !== undefined) {
+        if (!context.seededAppointmentId) {
+          return {
+            pass: false,
+            reason: "seeded_appointment_status check needs a scenario setup that seeds an appointment",
+          };
+        }
+        const { data, error } = await context.supabase
+          .from("appointments")
+          .select("status")
+          .eq("id", context.seededAppointmentId)
+          .maybeSingle();
+        if (error) throw new Error(`appointments query failed: ${error.message}`);
+        if (!data) {
+          return { pass: false, reason: "Seeded appointment row no longer exists" };
+        }
+        if (data.status !== db.seeded_appointment_status) {
+          return {
+            pass: false,
+            reason: `Expected seeded appointment status '${db.seeded_appointment_status}', but found '${data.status}'`,
+          };
+        }
+      }
+    } catch (err) {
+      return {
+        pass: false,
+        reason: `DB check could not run: ${err instanceof Error ? err.message : String(err)}`,
+      };
     }
   }
 

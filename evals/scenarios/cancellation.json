@@ -18,13 +18,21 @@
         }
       ],
       "expect": {
-        "tools_called": ["cancel_appointment"],
+        "tools_called": [
+          "cancel_appointment"
+        ],
         "reply_contains_any": [
-          ["cancelled", "canceled", "has been cancelled", "has been canceled"]
+          [
+            "cancelled",
+            "canceled",
+            "has been cancelled",
+            "has been canceled"
+          ]
         ],
         "reply_no_markdown": true,
         "db": {
-          "appointment_count": 0
+          "appointment_count": 0,
+          "seeded_appointment_status": "cancelled"
         }
       }
     },
@@ -45,13 +53,17 @@
         }
       ],
       "expect": {
-        "reply_not_contains": ["cancelled successfully", "appointment has been cancelled", "has been canceled"],
+        "reply_not_contains": [
+          "cancelled successfully",
+          "appointment has been cancelled",
+          "has been canceled"
+        ],
         "reply_no_markdown": true,
         "db": {
-          "appointment_count": 1
+          "appointment_count": 1,
+          "seeded_appointment_status": "booked"
         }
       }
     }
   ]
 }
-

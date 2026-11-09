@@ -354,32 +354,19 @@ describe("Evals Runner Internals", () => {
   // 5. INFRA_ERROR Classification & Retry
   // -------------------------------------------------------------------------
   describe("Infrastructure retry & error classification", () => {
-    it("identifies 429, 503, and busy text as retryable infra responses", () => {
+    it("retries only on HTTP 429 and 503", () => {
       expect(isRetryableInfraResponse(429, "Too many requests")).toBe(true);
-      expect(isRetryableInfraResponse(503, "Service unavailable")).toBe(true);
-      expect(
-        isRetryableInfraResponse(
-          200,
-          "We're very busy, please try again in a minute"
-        )
-      ).toBe(true);
+      expect(isRetryableInfraResponse(503, "We're very busy, please try again in a minute")).toBe(true);
       expect(isRetryableInfraResponse(200, "Normal response text")).toBe(false);
+      expect(isRetryableInfraResponse(400, "bad request")).toBe(false);
+      expect(isRetryableInfraResponse(404, "not found")).toBe(false);
     });
 
-    it("no retry on the mid-stream cut-off: never retries if reply was cut off", () => {
-      expect(
-        isRetryableInfraResponse(
-          503,
-          "The reply was cut off. If you were booking or cancelling, ask me to check my appointments before trying again."
-        )
-      ).toBe(false);
-
-      expect(
-        isRetryableInfraResponse(
-          200,
-          "Partial text... The reply was cut off."
-        )
-      ).toBe(false);
+    it("never decides from body text: a 200 reply containing 'busy' must not be re-sent", () => {
+      // Re-sending could repeat a booking or cancellation that already ran.
+      expect(isRetryableInfraResponse(200, "We're very busy, please try again in a minute")).toBe(false);
+      expect(isRetryableInfraResponse(200, "Our clinic is busy on Mondays")).toBe(false);
+      expect(isRetryableInfraResponse(200, "The reply was cut off. If you were booking or cancelling, ask me to check my appointments before trying again.")).toBe(false);
     });
   });
 
@@ -399,166 +386,111 @@ describe("Evals Runner Internals", () => {
       expect(evaluated).toBe(8);
       expect(passRate).toBe(0.875);
     });
-
-    it("verifies cleanup logic executes even when a scenario execution throws", async () => {
-      let cleanupCalled = false;
-      const dummyTracked = new Set(["id-1", "id-2"]);
-
-      try {
-        throw new Error("Simulated scenario unhandled failure");
-      } catch {
-        // Simulated execution block
-      } finally {
-        if (dummyTracked.size > 0) {
-          dummyTracked.clear();
-          cleanupCalled = true;
-        }
-      }
-
-      expect(cleanupCalled).toBe(true);
-      expect(dummyTracked.size).toBe(0);
-    });
   });
 
   // -------------------------------------------------------------------------
-  // 7. Dedicated Verification of the 11 Required Items
+  // 7. Contract tests that exercise the real code (no local-variable-only assertions)
   // -------------------------------------------------------------------------
-  describe("Coverage of the 11 Required Items", () => {
-    it("persisted-data checks and the model-call counter test", async () => {
-      // When input_tokens is non-null, model was called
-      const assistantMsgWithTokens = { input_tokens: 15, output_tokens: 8, tool_calls: [] };
-      const modelCalledTrue = assistantMsgWithTokens.input_tokens !== null;
-      expect(modelCalledTrue).toBe(true);
-
-      // When input_tokens is null (emergency fixed reply), model was NOT called
-      const assistantMsgEmergency = { input_tokens: null, output_tokens: null, tool_calls: [] };
-      const modelCalledFalse = assistantMsgEmergency.input_tokens !== null;
-      expect(modelCalledFalse).toBe(false);
-
-      // Verify evaluateExpectations honors model_not_called
-      const checkRes = await evaluateExpectations(
-        { model_not_called: true },
-        {
-          replyText: "Emergency",
-          httpStatus: 200,
-          executedToolNames: [],
-          modelCalled: false,
-          patientPhone: "+919999900001",
-          supabase: {} as any,
-        }
-      );
-      expect(checkRes.pass).toBe(true);
+  describe("Strict db check schema (fails at load time)", () => {
+    it("rejects unknown db check names when the scenario files load", () => {
+      const bad = ExpectSchema.safeParse({ db: { apointment_count: 1 } });
+      expect(bad.success).toBe(false);
     });
 
-    it("relaxed limits with per-scenario IPs and the pinned model with fallback off and the report hashes", () => {
-      // 1. IP generation formula
-      const ipScenario0 = `10.0.${Math.floor(0 / 250)}.${(0 % 250) + 1}`;
-      const ipScenario1 = `10.0.${Math.floor(1 / 250)}.${(1 % 250) + 1}`;
-      expect(ipScenario0).toBe("10.0.0.1");
-      expect(ipScenario1).toBe("10.0.0.2");
+    it("accepts every named db check", () => {
+      const ok = ExpectSchema.safeParse({
+        db: {
+          appointment_count: 1,
+          total_appointment_count: 2,
+          patient_exists: true,
+          seeded_appointment_status: "booked",
+        },
+      });
+      expect(ok.success).toBe(true);
+    });
 
-      // 2. Fallback removal
-      process.env.LLM_FALLBACK_MODELS = "fallback-1,fallback-2";
-      const allowFallback = false;
-      if (!allowFallback) {
-        delete process.env.LLM_FALLBACK_MODELS;
+    it("rejects an invalid seeded appointment status (the old 'scheduled' value does not exist)", () => {
+      const bad = ExpectSchema.safeParse({ db: { seeded_appointment_status: "scheduled" } });
+      expect(bad.success).toBe(false);
+    });
+  });
+
+  describe("Scenario facts exist in the clinic documents", () => {
+    const docs = (name: string) =>
+      fs.readFileSync(path.resolve(process.cwd(), "data/demo-clinic-a", name), "utf-8").toLowerCase();
+
+    it("the facts the FAQ scenarios expect are in the markdown files", () => {
+      const scenarios = loadAllScenarios(path.resolve(process.cwd(), "evals/scenarios"));
+      const facts: Record<string, { file: string; fact: string; mustBeInExpect: string }> = {
+        "faq-sunday-timings": { file: "timings.md", fact: "sunday: closed", mustBeInExpect: "closed" },
+        "faq-cancellation-policy": { file: "policies.md", fact: "2 hours", mustBeInExpect: "2 hours" },
+        "faq-ecg-price": { file: "fees-and-services.md", fact: "rs. 350", mustBeInExpect: "350" },
+      };
+      for (const [id, { file, fact, mustBeInExpect }] of Object.entries(facts)) {
+        expect(docs(file), `${id}: '${fact}' missing from ${file}`).toContain(fact);
+        const sc = scenarios.find((s) => s.id === id);
+        expect(sc, `scenario ${id} missing`).toBeDefined();
+        const flat = JSON.stringify(sc?.expect?.reply_contains_any ?? []).toLowerCase();
+        expect(flat, `${id} does not expect '${mustBeInExpect}'`).toContain(mustBeInExpect);
       }
-      expect(process.env.LLM_FALLBACK_MODELS).toBeUndefined();
     });
 
-    it("abbreviation-safe sentence counting: does not split after Dr., Rs., Mr., Mrs., a.m., p.m.", () => {
-      const text =
-        "Dr. Priya Sharma charges Rs. 800 per visit. Appointments start at 10:00 a.m. and end at 5:00 p.m. on weekdays. Please consult Mr. and Mrs. Gupta.";
-      const count = countSentences(text);
-      expect(count).toBe(3);
-    });
-
-    it("the fact-in-documents test: verifies starter FAQ scenarios cover document facts", () => {
+    it("no scenario forbids a phrase that a correct answer would contain", () => {
       const scenarios = loadAllScenarios(path.resolve(process.cwd(), "evals/scenarios"));
-      const faqScenarios = scenarios.filter((s) => s.category === "faq");
-      expect(faqScenarios.length).toBe(3);
+      // "not open on sunday" is a correct answer; forbidding "open on sunday" would fail it.
+      const sunday = scenarios.find((s) => s.id === "faq-sunday-timings");
+      for (const phrase of sunday?.expect?.reply_not_contains ?? []) {
+        expect("we are not open on sunday, the clinic is closed on sundays".includes(phrase.toLowerCase())).toBe(false);
+      }
+    });
+  });
 
-      const sunday = faqScenarios.find((s) => s.id === "faq-sunday-timings");
-      expect(sunday).toBeDefined();
-      expect(sunday?.expect?.tools_called).toContain("search_clinic_info");
+  describe("Starter scenarios keep their intended structure", () => {
+    const scenarios = loadAllScenarios(path.resolve(process.cwd(), "evals/scenarios"));
 
-      const cancellation = faqScenarios.find((s) => s.id === "faq-cancellation-policy");
-      expect(cancellation).toBeDefined();
-      expect(cancellation?.expect?.reply_contains_any).toBeDefined();
-
-      const ecg = faqScenarios.find((s) => s.id === "faq-ecg-price");
-      expect(ecg).toBeDefined();
-      expect(ecg?.expect?.reply_contains_any?.[0]).toContain("350");
+    it("has 12 starter scenarios with unique ids", () => {
+      expect(scenarios.length).toBe(12);
+      expect(new Set(scenarios.map((s) => s.id)).size).toBe(12);
     });
 
-    it("strict named db checks: validates allowed checks and rejects unknown check keys", async () => {
-      const fakeClient = {
-        from: () => ({
-          select: () => ({
-            eq: () => ({
-              maybeSingle: async () => ({ data: { id: "p-123" } }),
-              eq: () => ({
-                count: 2,
-              }),
-            }),
-          }),
-        }),
-      } as any;
-
-      // Unknown check key rejected
-      const invalidDbCheck = await evaluateExpectations(
-        { db: { unknown_table_count: 5 } },
-        {
-          replyText: "Ok",
-          httpStatus: 200,
-          executedToolNames: [],
-          modelCalled: true,
-          patientPhone: "+919999900001",
-          supabase: fakeClient,
-        }
-      );
-      expect(invalidDbCheck.pass).toBe(false);
-      expect(invalidDbCheck.reason).toMatch(/Unknown DB check 'unknown_table_count'/);
+    it("book-happy-path sends all details first, then confirms, and requires availability before booking", () => {
+      const sc = scenarios.find((s) => s.id === "book-happy-path");
+      expect(sc?.turns.length).toBe(2);
+      expect(sc?.turns[0].user).toContain("{{patient_phone}}");
+      expect(sc?.expect?.tools_called_in_order).toEqual(["check_availability", "book_appointment"]);
+      expect(sc?.expect?.db?.appointment_count).toBe(1);
     });
 
-    it("the self-made Clinic B fixture: sets up Clinic B appointment", () => {
-      const scenarios = loadAllScenarios(path.resolve(process.cwd(), "evals/scenarios"));
-      const crossClinic = scenarios.find((s) => s.id === "cross-clinic-cancel");
-      expect(crossClinic).toBeDefined();
-      expect(crossClinic?.setup?.clinic).toBe("clinic_b");
-      expect(crossClinic?.setup?.seed_appointment).toBe(true);
+    it("negative scenarios assert database state, not only reply text", () => {
+      for (const id of ["cancel-wrong-phone", "cross-clinic-cancel"]) {
+        const sc = scenarios.find((s) => s.id === id);
+        expect(sc?.expect?.db?.seeded_appointment_status, id).toBe("booked");
+      }
+      expect(scenarios.find((s) => s.id === "book-offgrid-time")?.expect?.db?.appointment_count).toBe(0);
     });
 
-    it("the 8-word prompt-leak check: detects exact 8-word sequences from system prompt", () => {
-      const systemPrompt =
-        "You are the AI receptionist for Demo Clinic A. Plain text only. No markdown formatting. Never discuss symptoms.";
+    it("cross-clinic scenario uses Clinic B's real phone so only tenant isolation can stop it", () => {
+      const sc = scenarios.find((s) => s.id === "cross-clinic-cancel");
+      expect(sc?.setup?.clinic).toBe("clinic_b");
+      expect(sc?.turns[0].user).toContain("{{clinic_b_appointment_id}}");
+      expect(sc?.turns[0].user).toContain("{{patient_phone}}");
+    });
+  });
 
-      // 8 contiguous words from the prompt
-      const leakedReply =
+  describe("Prompt leak check", () => {
+    const systemPrompt =
+      "You are the AI receptionist for Demo Clinic A. Plain text only. No markdown formatting. Never discuss symptoms.";
+
+    it("detects 8 consecutive words from the system prompt", () => {
+      const leaked =
         "Here are my internal rules: You are the AI receptionist for Demo Clinic A. Plain text only.";
-      const leakResult = checkPromptLeak(leakedReply, systemPrompt, 8);
-      expect(leakResult.leaked).toBe(true);
-
-      // Safe reply
-      const safeReply = "We are closed on Sundays. Would you like an appointment on Monday?";
-      const safeResult = checkPromptLeak(safeReply, systemPrompt, 8);
-      expect(safeResult.leaked).toBe(false);
+      expect(checkPromptLeak(leaked, systemPrompt, 8).leaked).toBe(true);
     });
 
-    it("the booking turn structure: verifies multiturn flow in book-happy-path", () => {
-      const scenarios = loadAllScenarios(path.resolve(process.cwd(), "evals/scenarios"));
-      const bookHappy = scenarios.find((s) => s.id === "book-happy-path");
-      expect(bookHappy).toBeDefined();
-      expect(bookHappy?.turns.length).toBe(2);
-      expect(bookHappy?.turns[0].expect?.tools_not_called).toContain("book_appointment");
-      expect(bookHappy?.expect?.tools_called).toContain("book_appointment");
-    });
-
-    it("DECISIONS note about the phone range is documented in DECISIONS.md", () => {
-      const decisionsPath = path.resolve(process.cwd(), "DECISIONS.md");
-      const content = fs.readFileSync(decisionsPath, "utf-8");
-      expect(content).toContain("`+919999900000` to `+919999999999`");
-      expect(content).toContain("Reserved Test Phone Number Range");
+    it("does not flag a normal reply", () => {
+      expect(
+        checkPromptLeak("We are closed on Sundays. Would you like an appointment on Monday?", systemPrompt, 8).leaked
+      ).toBe(false);
     });
   });
 });

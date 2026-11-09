@@ -123,23 +123,13 @@ export function loadAllScenarios(dir: string): Scenario[] {
   return allScenarios;
 }
 
-export function isRetryableInfraResponse(status: number, bodyText: string): boolean {
-  // Never retry if reply was cut off mid-stream
-  if (
-    bodyText.includes("cut off") ||
-    bodyText.includes("The reply was cut off") ||
-    bodyText.includes("check my appointments before trying again")
-  ) {
-    return false;
-  }
-  if (status === 429 || status === 503) return true;
-  const lower = bodyText.toLowerCase();
-  return (
-    lower.includes("busy") ||
-    lower.includes("rate limit") ||
-    lower.includes("try again in a minute") ||
-    lower.includes("too many requests")
-  );
+/**
+ * Only the route's own friendly 429 / 503 responses are retried. The body text is NEVER used
+ * to decide: a normal 200 reply that happens to contain a word like "busy" must not cause the
+ * user message to be sent again, because a tool may already have run.
+ */
+export function isRetryableInfraResponse(status: number, _bodyText: string): boolean {
+  return status === 429 || status === 503;
 }
 
 export async function runScenario(
@@ -165,13 +155,14 @@ export async function runScenario(
 
   let doctorAId: string | undefined;
   let clinicBAppointmentId: string | undefined;
+  let seededAppointmentId: string | undefined;
 
   // Get primary doctor for Clinic A
   const { data: docA } = await supabase
     .from("doctors")
     .select("id")
     .eq("clinic_id", clinicAId)
-    .eq("is_active", true)
+    .eq("active", true)
     .order("created_at", { ascending: true })
     .limit(1)
     .maybeSingle();
@@ -189,7 +180,7 @@ export async function runScenario(
         .upsert(
           {
             clinic_id: targetClinicId,
-            full_name: "Test Patient",
+            name: "Test Patient",
             phone: patientPhone,
           },
           { onConflict: "clinic_id,phone" }
@@ -207,7 +198,8 @@ export async function runScenario(
         .from("doctors")
         .select("id")
         .eq("clinic_id", targetClinicId)
-        .eq("is_active", true)
+        .eq("active", true)
+        .order("created_at", { ascending: true })
         .limit(1)
         .single();
 
@@ -217,10 +209,16 @@ export async function runScenario(
 
       const daysAhead = scenario.setup.days_from_now ?? 7;
       const slotTime = scenario.setup.slot_time ?? "10:00";
-      const startAt = DateTime.now()
-        .setZone("Asia/Kolkata")
-        .plus({ days: daysAhead })
-        .toFormat(`yyyy-MM-dd'T'${slotTime}:00ZZ`);
+      const startDt = DateTime.fromFormat(
+        `${DateTime.now().setZone("Asia/Kolkata").plus({ days: daysAhead }).toFormat("yyyy-MM-dd")} ${slotTime}`,
+        "yyyy-MM-dd HH:mm",
+        { zone: "Asia/Kolkata" }
+      );
+      if (!startDt.isValid) {
+        throw new Error(`Invalid seeded slot time '${slotTime}'`);
+      }
+      const startAt = startDt.toUTC().toISO();
+      const endAt = startDt.plus({ minutes: 15 }).toUTC().toISO();
 
       const { data: appt, error: apptErr } = await supabase
         .from("appointments")
@@ -229,7 +227,9 @@ export async function runScenario(
           doctor_id: targetDoc.id,
           patient_id: patient.id,
           start_at: startAt,
-          status: "scheduled",
+          end_at: endAt,
+          status: "booked",
+          created_via: "staff",
         })
         .select("id")
         .single();
@@ -239,6 +239,7 @@ export async function runScenario(
       }
 
       createdAppointmentIds.add(appt.id);
+      seededAppointmentId = appt.id;
       if (scenario.setup.clinic === "clinic_b") {
         clinicBAppointmentId = appt.id;
       }
@@ -375,6 +376,7 @@ export async function runScenario(
           conversationStatus,
           modelCalled,
           patientPhone,
+          seededAppointmentId,
           supabase,
           systemPromptText,
         });
@@ -440,6 +442,7 @@ export async function runScenario(
         conversationStatus: finalConvStatus,
         modelCalled: turnResults.some((tr) => tr.modelCalled),
         patientPhone,
+        seededAppointmentId,
         supabase,
         systemPromptText,
       });
@@ -462,8 +465,23 @@ export async function runScenario(
       totalTokens,
     };
   } finally {
-    // 4. Strict cleanup in finally: delete strictly tracked rows
+    // 4. Strict cleanup. Everything the scenario touched is either tracked by id, or belongs to the
+    //    scenario's own reserved fake phone number (the bot creates patients and appointments itself
+    //    during booking flows, so id tracking alone would leak them).
     try {
+      const patientIds = new Set<string>(createdPatientIds);
+      const { data: phonePatients } = await supabase
+        .from("patients")
+        .select("id")
+        .eq("phone", patientPhone);
+      for (const row of phonePatients ?? []) patientIds.add(row.id as string);
+
+      if (patientIds.size > 0) {
+        await supabase
+          .from("appointments")
+          .delete()
+          .in("patient_id", Array.from(patientIds));
+      }
       if (createdAppointmentIds.size > 0) {
         await supabase
           .from("appointments")
@@ -475,16 +493,16 @@ export async function runScenario(
         await supabase.from("messages").delete().in("conversation_id", convIds);
         await supabase.from("conversations").delete().in("id", convIds);
       }
-      if (createdPatientIds.size > 0) {
+      if (patientIds.size > 0) {
         await supabase
           .from("patients")
           .delete()
-          .in("id", Array.from(createdPatientIds));
+          .in("id", Array.from(patientIds));
       }
-    } catch (cleanupErr: any) {
+    } catch (cleanupErr: unknown) {
       console.error(
         `[Cleanup Error for scenario ${scenario.id}]:`,
-        cleanupErr?.message
+        cleanupErr instanceof Error ? cleanupErr.message : String(cleanupErr)
       );
     }
   }
